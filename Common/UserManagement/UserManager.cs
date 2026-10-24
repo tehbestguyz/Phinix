@@ -15,6 +15,25 @@ namespace UserManagement
         public readonly string MODULE_NAME = typeof(UserManager).Namespace;
         
         public static readonly Version Version = Assembly.GetAssembly(typeof(UserManager)).GetName().Version;
+
+        /// <summary>
+        /// Longest bio kept, in characters. About two or three short sentences, which fits in a tooltip.
+        /// </summary>
+        public const int MAX_BIO_LENGTH = 200;
+
+        /// <summary>
+        /// Tidies a bio the same way on both ends: no colours or formatting, one line, and no longer than
+        /// <see cref="MAX_BIO_LENGTH"/>.
+        /// </summary>
+        /// <param name="bio">Bio as written</param>
+        /// <returns>The bio to keep, or an empty string</returns>
+        public static string CleanBio(string bio)
+        {
+            if (string.IsNullOrWhiteSpace(bio)) return "";
+
+            string clean = string.Join(" ", TextHelper.StripRichText(bio).Split((char[]) null, StringSplitOptions.RemoveEmptyEntries));
+            return clean.Length > MAX_BIO_LENGTH ? clean.Substring(0, MAX_BIO_LENGTH).TrimEnd() : clean;
+        }
         
         /// <inheritdoc />
         public abstract event EventHandler<LogEventArgs> OnLogEntry;
@@ -70,15 +89,16 @@ namespace UserManagement
         /// <param name="username">Username of the user</param>
         /// <param name="displayName">Display name of the user</param>
         /// <param name="loggedIn">Whether the user should be logged in</param>
+        /// <param name="uuid">UUID to give the user, or null for a new random one</param>
         /// <returns>UUID of created user</returns>
         /// <exception cref="ArgumentException">Display name cannot be null or empty</exception>
-        public string CreateUser(string username, string displayName, bool loggedIn = false)
+        public string CreateUser(string username, string displayName, bool loggedIn = false, string uuid = null)
         {
             if (string.IsNullOrEmpty(displayName)) throw new ArgumentException("Display name cannot be null or empty.", nameof(displayName));
 
             User user = new User
             {
-                Uuid = Guid.NewGuid().ToString(),
+                Uuid = uuid ?? Guid.NewGuid().ToString(),
                 Username = username,
                 DisplayName = string.IsNullOrEmpty(displayName) ? "" : displayName,
                 LoggedIn = loggedIn
@@ -101,7 +121,8 @@ namespace UserManagement
         /// <param name="acceptingTrades">Whether the user is accepting trades</param>
         /// <returns>User updated successfully</returns>
         /// <exception cref="ArgumentNullException">UUID cannot be null or empty</exception>
-        public virtual bool UpdateUser(string uuid, string displayName = null, bool? acceptingTrades = null)
+        /// <param name="bio">The user's bio, already cleaned with <see cref="CleanBio"/></param>
+        public virtual bool UpdateUser(string uuid, string displayName = null, bool? acceptingTrades = null, string bio = null)
         {
             if (string.IsNullOrEmpty(uuid)) throw new ArgumentException("UUID cannot be null or empty.", nameof(uuid));
 
@@ -112,6 +133,8 @@ namespace UserManagement
                 if (displayName != null) userStore.Users[uuid].DisplayName = displayName;
 
                 if (acceptingTrades.HasValue) userStore.Users[uuid].AcceptingTrades = acceptingTrades.Value;
+
+                if (bio != null) userStore.Users[uuid].Bio = bio;
             }
 
             return true;
@@ -250,6 +273,50 @@ namespace UserManagement
             }
 
             return true;
+        }
+
+        /// <summary>
+        /// Attempts to get the bio of a user with the given UUID.
+        /// Returns whether the user was found; their bio is empty if they haven't written one.
+        /// </summary>
+        /// <param name="uuid">UUID of the user</param>
+        /// <param name="bio">Output bio</param>
+        /// <returns>User was found</returns>
+        public bool TryGetBio(string uuid, out string bio)
+        {
+            bio = "";
+            if (string.IsNullOrEmpty(uuid)) return false;
+
+            lock (userStoreLock)
+            {
+                if (!userStore.Users.TryGetValue(uuid, out User user)) return false;
+
+                bio = user.Bio;
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Attempts to get when a user last logged out, in Unix seconds by the server's clock.
+        /// Returns whether the server knows; it doesn't for players who haven't logged out since it started recording.
+        /// </summary>
+        /// <param name="uuid">UUID of the user</param>
+        /// <param name="lastSeen">Output time</param>
+        /// <returns>Whether a time is known</returns>
+        public bool TryGetLastSeen(string uuid, out long lastSeen)
+        {
+            lastSeen = 0;
+            if (string.IsNullOrEmpty(uuid)) return false;
+
+            lock (userStoreLock)
+            {
+                if (!userStore.Users.TryGetValue(uuid, out User user)) return false;
+
+                lastSeen = user.LastSeen;
+            }
+
+            return lastSeen > 0;
         }
 
         /// <summary>

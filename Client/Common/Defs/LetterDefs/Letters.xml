@@ -25,5 +25,14 @@
     <arriveSound>LetterArrive_Good</arriveSound>
   </LetterDef>
 
+  <LetterDef>
+    <defName>PhinixGiftOffer</defName>
+    <letterClass>PhinixClient.GiftOfferLetter</letterClass>
+    <color>(120, 176, 216)</color>
+    <flashColor>(106, 179, 231)</flashColor>
+    <flashInterval>90</flashInterval>
+    <arriveSound>LetterArrive_Good</arriveSound>
+  </LetterDef>
+
 </Defs>
 

@@ -24,14 +24,14 @@ namespace UserManagement {
     static UserReflection() {
       byte[] descriptorData = global::System.Convert.FromBase64String(
           string.Concat(
-            "ChBVc2Vycy9Vc2VyLnByb3RvEg5Vc2VyTWFuYWdlbWVudCJmCgRVc2VyEgwK",
-            "BFV1aWQYASABKAkSEAoIVXNlcm5hbWUYBCABKAkSEwoLRGlzcGxheU5hbWUY",
-            "AiABKAkSEAoITG9nZ2VkSW4YAyABKAgSFwoPQWNjZXB0aW5nVHJhZGVzGAUg",
-            "ASgIYgZwcm90bzM="));
+            "ChBVc2Vycy9Vc2VyLnByb3RvEg5Vc2VyTWFuYWdlbWVudCKFAQoEVXNlchIM",
+            "CgRVdWlkGAEgASgJEhAKCFVzZXJuYW1lGAQgASgJEhMKC0Rpc3BsYXlOYW1l",
+            "GAIgASgJEhAKCExvZ2dlZEluGAMgASgIEhcKD0FjY2VwdGluZ1RyYWRlcxgF",
+            "IAEoCBILCgNCaW8YBiABKAkSEAoITGFzdFNlZW4YByABKANiBnByb3RvMw=="));
       descriptor = pbr::FileDescriptor.FromGeneratedCode(descriptorData,
           new pbr::FileDescriptor[] { },
           new pbr::GeneratedClrTypeInfo(null, null, new pbr::GeneratedClrTypeInfo[] {
-            new pbr::GeneratedClrTypeInfo(typeof(global::UserManagement.User), global::UserManagement.User.Parser, new[]{ "Uuid", "Username", "DisplayName", "LoggedIn", "AcceptingTrades" }, null, null, null, null)
+            new pbr::GeneratedClrTypeInfo(typeof(global::UserManagement.User), global::UserManagement.User.Parser, new[]{ "Uuid", "Username", "DisplayName", "LoggedIn", "AcceptingTrades", "Bio", "LastSeen" }, null, null, null, null)
           }));
     }
     #endregion
@@ -68,6 +68,8 @@ namespace UserManagement {
       displayName_ = other.displayName_;
       loggedIn_ = other.loggedIn_;
       acceptingTrades_ = other.acceptingTrades_;
+      bio_ = other.bio_;
+      lastSeen_ = other.lastSeen_;
       _unknownFields = pb::UnknownFieldSet.Clone(other._unknownFields);
     }
 
@@ -131,6 +133,34 @@ namespace UserManagement {
       }
     }
 
+    /// <summary>Field number for the "Bio" field.</summary>
+    public const int BioFieldNumber = 6;
+    private string bio_ = "";
+    /// <summary>
+    /// A short line about themselves, shown when hovering over their name. Plain text, at most UserManager.MAX_BIO_LENGTH
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    public string Bio {
+      get { return bio_; }
+      set {
+        bio_ = pb::ProtoPreconditions.CheckNotNull(value, "value");
+      }
+    }
+
+    /// <summary>Field number for the "LastSeen" field.</summary>
+    public const int LastSeenFieldNumber = 7;
+    private long lastSeen_;
+    /// <summary>
+    /// When they last logged out, in Unix seconds by the server's clock. 0 if the server doesn't know
+    /// </summary>
+    [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
+    public long LastSeen {
+      get { return lastSeen_; }
+      set {
+        lastSeen_ = value;
+      }
+    }
+
     [global::System.Diagnostics.DebuggerNonUserCodeAttribute]
     public override bool Equals(object other) {
       return Equals(other as User);
@@ -149,6 +179,8 @@ namespace UserManagement {
       if (DisplayName != other.DisplayName) return false;
       if (LoggedIn != other.LoggedIn) return false;
       if (AcceptingTrades != other.AcceptingTrades) return false;
+      if (Bio != other.Bio) return false;
+      if (LastSeen != other.LastSeen) return false;
       return Equals(_unknownFields, other._unknownFields);
     }
 
@@ -160,6 +192,8 @@ namespace UserManagement {
       if (DisplayName.Length != 0) hash ^= DisplayName.GetHashCode();
       if (LoggedIn != false) hash ^= LoggedIn.GetHashCode();
       if (AcceptingTrades != false) hash ^= AcceptingTrades.GetHashCode();
+      if (Bio.Length != 0) hash ^= Bio.GetHashCode();
+      if (LastSeen != 0L) hash ^= LastSeen.GetHashCode();
       if (_unknownFields != null) {
         hash ^= _unknownFields.GetHashCode();
       }
@@ -193,6 +227,14 @@ namespace UserManagement {
         output.WriteRawTag(40);
         output.WriteBool(AcceptingTrades);
       }
+      if (Bio.Length != 0) {
+        output.WriteRawTag(50);
+        output.WriteString(Bio);
+      }
+      if (LastSeen != 0L) {
+        output.WriteRawTag(56);
+        output.WriteInt64(LastSeen);
+      }
       if (_unknownFields != null) {
         _unknownFields.WriteTo(output);
       }
@@ -215,6 +257,12 @@ namespace UserManagement {
       }
       if (AcceptingTrades != false) {
         size += 1 + 1;
+      }
+      if (Bio.Length != 0) {
+        size += 1 + pb::CodedOutputStream.ComputeStringSize(Bio);
+      }
+      if (LastSeen != 0L) {
+        size += 1 + pb::CodedOutputStream.ComputeInt64Size(LastSeen);
       }
       if (_unknownFields != null) {
         size += _unknownFields.CalculateSize();
@@ -241,6 +289,12 @@ namespace UserManagement {
       }
       if (other.AcceptingTrades != false) {
         AcceptingTrades = other.AcceptingTrades;
+      }
+      if (other.Bio.Length != 0) {
+        Bio = other.Bio;
+      }
+      if (other.LastSeen != 0L) {
+        LastSeen = other.LastSeen;
       }
       _unknownFields = pb::UnknownFieldSet.MergeFrom(_unknownFields, other._unknownFields);
     }
@@ -271,6 +325,14 @@ namespace UserManagement {
           }
           case 40: {
             AcceptingTrades = input.ReadBool();
+            break;
+          }
+          case 50: {
+            Bio = input.ReadString();
+            break;
+          }
+          case 56: {
+            LastSeen = input.ReadInt64();
             break;
           }
         }

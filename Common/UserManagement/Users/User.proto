@@ -12,4 +12,8 @@ message User
     bool LoggedIn = 3;
     
     bool AcceptingTrades = 5;
+
+    string Bio = 6;         // A short line about themselves, shown when hovering over their name. Plain text, at most UserManager.MAX_BIO_LENGTH
+
+    int64 LastSeen = 7;     // When they last logged out, in Unix seconds by the server's clock. 0 if the server doesn't know
 }

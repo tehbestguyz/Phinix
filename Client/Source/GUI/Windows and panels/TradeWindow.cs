@@ -17,6 +17,12 @@ namespace PhinixClient
     {
         private const float SCROLLBAR_WIDTH = 16f;
 
+        /// <summary>Size of the info button on pawn rows</summary>
+        private const float INFO_BUTTON_SIZE = 24f;
+
+        /// <summary>Colour for offered pawns with parts our game doesn't have (see <see cref="PawnCheck"/>)</summary>
+        public static readonly Color MISSING_PARTS_COLOR = new Color(1f, 0.65f, 0.3f);
+
         private const float DEFAULT_SPACING = 10f;
 
         private const float OFFER_WINDOW_WIDTH = 400f;
@@ -32,6 +38,9 @@ namespace PhinixClient
 
         private const float TITLE_HEIGHT = 30f;
 
+        private const float MOD_WARNING_HEIGHT = 24f;
+        private const float MOD_LIST_ROW_HEIGHT = 22f;
+
         public override Vector2 InitialSize => new Vector2(1000f, 750f);
 
         private readonly Regex itemCountInputRegex = new Regex("\\d*");
@@ -43,6 +52,28 @@ namespace PhinixClient
 
         private List<StackedThings> ourOfferCache = new List<StackedThings>();
         private List<StackedThings> theirOfferCache = new List<StackedThings>();
+
+        /// <summary>
+        /// Mods their offer needs that we don't have, and mods ours needs that they don't. See <see cref="ModCheck"/>.
+        /// </summary>
+        private List<ModCheck.MissingMod> theirMissingMods = new List<ModCheck.MissingMod>();
+        private List<ModCheck.MissingMod> ourMissingMods = new List<ModCheck.MissingMod>();
+
+        /// <summary>
+        /// The other player's mod list <see cref="ourMissingMods"/> was worked out from, so it's redone when the list
+        /// arrives or changes. Null until the server tells us.
+        /// </summary>
+        private HashSet<string> ourMissingModsFor;
+
+        /// <summary>
+        /// Whether each offer's missing mods list is open instead of its items, and which mods in it are expanded
+        /// (by "ours:" or "theirs:" plus the package ID).
+        /// </summary>
+        private bool ourModWarningOpen;
+        private bool theirModWarningOpen;
+        private HashSet<string> expandedMods = new HashSet<string>();
+        private Vector2 ourModWarningScrollPos = Vector2.zero;
+        private Vector2 theirModWarningScrollPos = Vector2.zero;
 
         /// <summary>
         /// The trade this window contains.
@@ -78,13 +109,13 @@ namespace PhinixClient
         private string searchText = string.Empty;
 
         /// <summary>
-        /// Collection of items that have been sent to the server and are waiting to be acknowledged organised by token.
+        /// Token of our last offer change, so we don't send another while the server hasn't answered this one.
         /// </summary>
-        private Dictionary<string, PendingThings> pendingItemStacks = new Dictionary<string, PendingThings>();
-        /// <summary>
-        /// Lock object protecting <see cref="pendingItemStacks"/>.
-        /// </summary>
-        private object pendingItemStacksLock = new object();
+        /// <remarks>
+        /// Each update sends our whole offer. If we sent a second one before the first was answered, it would be built
+        /// from an offer that doesn't include the first one's items yet, and those items would silently drop off.
+        /// </remarks>
+        private string waitingToken;
 
         /// <summary>
         /// Creates a new <see cref="TradeWindow"/> for the given trade ID.
@@ -93,6 +124,9 @@ namespace PhinixClient
         public TradeWindow(ImmutableTrade trade)
         {
             this.trade = trade;
+
+            // Opening a trade counts as seeing it, so it drops out of the Trades tab's "New" count
+            Client.Instance.MarkTradeSeen(trade.TradeId);
 
             this.doCloseX = true;
             this.closeOnAccept = false;
@@ -127,13 +161,43 @@ namespace PhinixClient
                 things = haulDestinations.SelectMany(haulDestination => haulDestination.HeldThings);
             }
 
+            // Only items go in this list; pawns are added separately below. Biocoded items can only go with the colonist
+            // they're coded to
+            things = things.Where(thing => thing.def.category == ThingCategory.Item && !thing.def.IsCorpse && ColonyItems.CanLeaveOnItsOwn(thing));
+
+            // Add every tame animal on our home maps, skipping dead ones
+            // Animals can't stack with each other, so GroupThings gives each one its own row
+            IEnumerable<Thing> animals = homeMaps
+                .SelectMany(map => map.mapPawns.SpawnedColonyAnimals)
+                .Where(animal => !animal.Dead);
+            things = things.Concat(animals);
+
+            // Add every free colonist on our home maps (see ColonistConverter.CanTrade for who counts)
+            IEnumerable<Thing> colonists = homeMaps
+                .SelectMany(map => map.mapPawns.FreeColonistsSpawned)
+                .Where(ColonistConverter.CanTrade);
+            things = things.Concat(colonists);
+
             // Group all items and cache them for later
-            availableItems = StackedThings.GroupThings(things.Where(thing => thing.def.category == ThingCategory.Item && !thing.def.IsCorpse));
+            availableItems = StackedThings.GroupThings(things);
             filteredAvailableItems = availableItems;
 
             // Pre-fill offer caches as well
-            ourOfferCache = StackedThings.GroupThings(trade.ItemsOnOffer.Select(TradingThingConverter.ConvertThingFromProtoOrUnknown));
-            theirOfferCache = StackedThings.GroupThings(trade.OtherPartyItemsOnOffer.Select(TradingThingConverter.ConvertThingFromProtoOrUnknown));
+            ourOfferCache = buildOfferCache(trade.ItemsOnOffer);
+            theirOfferCache = buildOfferCache(trade.OtherPartyItemsOnOffer);
+            refreshMissingMods();
+        }
+
+        /// <summary>
+        /// Works out both offers' missing mods again. Ours needs the other player's mod list, which arrives a moment
+        /// after the window opens; until then (or on a server that can't tell us) that warning stays empty.
+        /// </summary>
+        private void refreshMissingMods()
+        {
+            theirMissingMods = ModCheck.MissingFromTheirOffer(trade.OtherPartyItemsOnOffer);
+
+            Client.Instance.TryGetModList(trade.OtherPartyUuid, out ourMissingModsFor);
+            ourMissingMods = ourMissingModsFor != null ? ModCheck.MissingForThem(trade.ItemsOnOffer, ourMissingModsFor) : new List<ModCheck.MissingMod>();
         }
 
         public override void Close(bool doCloseSound = true)
@@ -156,8 +220,9 @@ namespace PhinixClient
                     trade = updatedTrade;
 
                     // Refresh trade caches
-                    ourOfferCache = StackedThings.GroupThings(trade.ItemsOnOffer.Select(TradingThingConverter.ConvertThingFromProtoOrUnknown));
-                    theirOfferCache = StackedThings.GroupThings(trade.OtherPartyItemsOnOffer.Select(TradingThingConverter.ConvertThingFromProtoOrUnknown));
+                    ourOfferCache = buildOfferCache(trade.ItemsOnOffer);
+                    theirOfferCache = buildOfferCache(trade.OtherPartyItemsOnOffer);
+                    refreshMissingMods();
 
                     // Reset the update flag
                     tradeUpdated = false;
@@ -165,6 +230,9 @@ namespace PhinixClient
                     Monitor.Exit(updatedTradeLock);
                 }
             }
+
+            // Their mod list arrives (or changes) after the window opens
+            if (Client.Instance.TryGetModList(trade.OtherPartyUuid, out HashSet<string> theirMods) && theirMods != ourMissingModsFor) refreshMissingMods();
 
             // Build layout rects
             Rect titleRect = inRect.TopPartPixels(TITLE_HEIGHT);
@@ -207,12 +275,33 @@ namespace PhinixClient
                 scrollPos: ref ourOfferScrollPos,
                 accepted: ref ourOfferAccepted,
                 acceptedLabel: ("Phinix_trade_confirmOurTradeCheckbox" + (trade.Accepted ? "Checked" : "Unchecked")).Translate(),
-                checkboxInteractive: true
+                checkboxInteractive: true,
+                missingMods: ourMissingMods,
+                modWarning: modWarningText(ourMissingMods, "Phinix_modCheck_theyreMissing", TextHelper.StripRichText(trade.OtherPartyDisplayName)),
+                modWarningOpen: ref ourModWarningOpen,
+                modWarningScrollPos: ref ourModWarningScrollPos,
+                side: "ours:"
             );
             if (ourOfferAccepted != trade.Accepted)
             {
-                // Update our accepted state
-                new Thread(() => Client.Instance.UpdateTradeStatus(trade.TradeId, accepted: ourOfferAccepted)).Start();
+                // If they're offering animals or colonists with parts our game doesn't have (a modded bionic, a gene, an
+                // item in their pockets), or items from mods we don't have, say what will be left behind before
+                // agreeing. Un-accepting never needs asking
+                string missing = ourOfferAccepted ? describeLeftBehind() : null;
+                string tradeId = trade.TradeId;
+                bool accept = ourOfferAccepted;
+                if (missing == null)
+                {
+                    // Update our accepted state
+                    new Thread(() => Client.Instance.UpdateTradeStatus(tradeId, accepted: accept)).Start();
+                }
+                else
+                {
+                    Find.WindowStack.Add(Dialog_MessageBox.CreateConfirmation(
+                        missing,
+                        () => new Thread(() => Client.Instance.UpdateTradeStatus(tradeId, accepted: true)).Start(),
+                        destructive: true));
+                }
             }
 
             // Their offer
@@ -223,74 +312,62 @@ namespace PhinixClient
                 scrollPos: ref theirOfferScrollPos,
                 accepted: ref theirOfferAccepted,
                 acceptedLabel: ("Phinix_trade_confirmTheirTradeCheckbox" + (trade.OtherPartyAccepted ? "Checked" : "Unchecked")).Translate(TextHelper.StripRichText(trade.OtherPartyDisplayName)),
-                checkboxInteractive: false
+                checkboxInteractive: false,
+                missingMods: theirMissingMods,
+                modWarning: modWarningText(theirMissingMods, "Phinix_modCheck_youreMissing", TextHelper.StripRichText(trade.OtherPartyDisplayName)),
+                modWarningOpen: ref theirModWarningOpen,
+                modWarningScrollPos: ref theirModWarningScrollPos,
+                side: "theirs:"
             );
 
             // Update button
             if (Widgets.ButtonText(updateButtonRect, "Phinix_trade_updateButton".Translate()))
             {
-                try
+                if (ItemEscrow.IsHolding(waitingToken))
                 {
-                    // Create a new token
-                    string token = Guid.NewGuid().ToString();
-                    List <Thing> selectedThings = new List<Thing>();
-
-                    // Collect all our things and despawn them all
-                    foreach (StackedThings itemStack in availableItems)
-                    {
-                        // Pop the selected things from the stack
-                        Thing[] things = itemStack.PopSelected().ToArray();
-
-                        // Despawn each spawned thing
-                        foreach (Thing thing in things)
-                        {
-                            if (thing.Spawned) thing.DeSpawn();
-                        }
-
-                        // Add them to the selected things list
-                        selectedThings.AddRange(things);
-                    }
-
-                    lock (pendingItemStacksLock)
-                    {
-                        // Add the items to the pending dictionary
-                        pendingItemStacks.Add(token, new PendingThings
-                        {
-                            Things = selectedThings.ToArray(),
-                            Timestamp = DateTime.UtcNow
-                        });
-                    }
-                    Log.Message("Added items to pending");
-
-
-                    // Get the items we have on offer and splice in the selected items
-                    IEnumerable<ProtoThing> actualOffer = trade.ItemsOnOffer.Concat(selectedThings.Select(TradingThingConverter.ConvertThingFromVerse));
-
-                    // Send an update to the server
-                    Client.Instance.UpdateTradeItems(trade.TradeId, actualOffer, token);
-                    Log.Message("Sent update");
+                    Messages.Message("Phinix_trade_waitingForServer".Translate(), MessageTypeDefOf.RejectInput, historical: false);
                 }
-                catch (Exception e)
+                else if (!selectionStillHere())
                 {
-                    Log.Message(e.ToString());
+                    // Something picked was eaten, used, moved or merged since the list was made. Sending it anyway
+                    // would duplicate it, so the amounts are trimmed to what's there and the player checks again
+                    Messages.Message("Phinix_trade_selectionChanged".Translate(), MessageTypeDefOf.RejectInput, historical: false);
+                }
+                else if (Client.Instance.TradeStripsDetails(trade.TradeId) && strippedDetailsWarning() is string warning)
+                {
+                    // On a server running the original Phinix, some things would arrive changed. Say which first
+                    Find.WindowStack.Add(Dialog_MessageBox.CreateConfirmation(warning, offerSelected, destructive: true));
+                }
+                else
+                {
+                    offerSelected();
                 }
             }
 
             // Reset button
             if (Widgets.ButtonText(resetButtonRect, "Phinix_trade_resetButton".Translate()))
             {
-                // Convert and drop our items in pods
-                Client.Instance.DropPods(trade.ItemsOnOffer.Select(TradingThingConverter.ConvertThingFromProto));
-
-
-                // Reset all selected counts to zero
-                foreach (StackedThings stack in availableItems)
+                if (ItemEscrow.IsHolding(waitingToken))
                 {
-                    stack.Selected = 0;
+                    Messages.Message("Phinix_trade_waitingForServer".Translate(), MessageTypeDefOf.RejectInput, historical: false);
                 }
+                else
+                {
+                    // Our items only come back once the server confirms it has taken them off the offer. Before, they
+                    // were dropped straight away, so an empty offer that never reached the server meant they were
+                    // both on offer and back home (or, the other way round, gone from both)
+                    List<Thing> comingBack = trade.ItemsOnOffer.Select(TradingThingConverter.ConvertReceivedThing).ToList();
+                    waitingToken = ItemEscrow.HoldReturning(comingBack, Client.Instance.TradeEscrowModule(trade.TradeId));
 
-                // Update trade items
-                Client.Instance.UpdateTradeItems(trade.TradeId, Array.Empty<ProtoThing>());
+                    // Reset all selected counts to zero
+                    foreach (StackedThings stack in availableItems)
+                    {
+                        stack.Selected = 0;
+                    }
+
+                    // Update trade items
+                    Client.Instance.UpdateTradeItems(trade.TradeId, Array.Empty<ProtoThing>(), waitingToken);
+                }
             }
 
             // Save GUI colour
@@ -335,6 +412,126 @@ namespace PhinixClient
         }
 
         /// <summary>
+        /// Takes the picked things off the map, holds them, and sends the new offer to the server.
+        /// </summary>
+        private void offerSelected()
+        {
+            // The picks can change while a confirmation is up
+            if (ItemEscrow.IsHolding(waitingToken) || !selectionStillHere()) return;
+
+            try
+            {
+                List <Thing> selectedThings = new List<Thing>();
+                List<Map> selectedThingMaps = new List<Map>();
+                List<IntVec3> selectedThingPositions = new List<IntVec3>();
+
+                // Collect all our things and despawn them all
+                foreach (StackedThings itemStack in availableItems)
+                {
+                    // Pop the selected things from the stack, remembering where each was
+                    // (despawning clears thing.Map, and we need it to put things back if the server says no)
+                    Thing[] things = itemStack.PopSelected(selectedThingPositions, selectedThingMaps).ToArray();
+                    foreach (Thing thing in things)
+                    {
+                        if (thing.Spawned) thing.DeSpawn();
+                    }
+
+                    // Add them to the selected things list
+                    selectedThings.AddRange(things);
+                }
+
+                // Hold them under a token. They're kept in the save file until the server answers (or, if the
+                // connection drops first, until the check after logging back in), so they can't just vanish.
+                // Client.settleTradeOffer handles the answer
+                string token = ItemEscrow.Hold(selectedThings, selectedThingMaps, Client.Instance.TradeEscrowModule(trade.TradeId), selectedThingPositions);
+                waitingToken = token;
+
+
+                // Get the items we have on offer and splice in the selected items
+                IEnumerable<ProtoThing> actualOffer = trade.ItemsOnOffer.Concat(selectedThings.Select(TradingThingConverter.ConvertThingForSending));
+
+                // Send an update to the server
+                Client.Instance.UpdateTradeItems(trade.TradeId, actualOffer, token);
+                Log.Message("Sent update");
+            }
+            catch (Exception e)
+            {
+                Log.Message(e.ToString());
+            }
+        }
+
+        /// <summary>
+        /// Lists the picked things a server running the original Phinix would change on the way, with how, or null if
+        /// there are none. That server only passes on an item's kind, material, quality, hit points and count.
+        /// </summary>
+        private string strippedDetailsWarning()
+        {
+            List<string> lines = new List<string>();
+            foreach (StackedThings stack in availableItems.Where(stack => stack.Selected > 0 && stack.Things.Count > 0))
+            {
+                Thing thing = stack.Things[0];
+                string how = null;
+                if (thing is GeneSetHolderBase) how = "Phinix_trade_stripped_genes".Translate();
+                else if (thing is Pawn) how = "Phinix_trade_stripped_pawn".Translate();
+                else if (thing.TryGetComp<CompArt>()?.Active == true) how = "Phinix_trade_stripped_art".Translate();
+                else if (thing is Book) how = "Phinix_trade_stripped_book".Translate();
+                else if (thing is ThingWithComps withComps && withComps.AllComps.Any(comp => comp.GetType().Name.IndexOf("Unique", StringComparison.OrdinalIgnoreCase) >= 0)) how = "Phinix_trade_stripped_unique".Translate();
+                if (how != null) lines.Add("  - " + thing.LabelCapNoCount + ": " + how);
+            }
+            if (lines.Count == 0) return null;
+
+            return "Phinix_trade_strippedWarning".Translate(TextHelper.StripRichText(trade.OtherPartyDisplayName), string.Join("\n", lines));
+        }
+
+        /// <summary>
+        /// Drops anything from the picked rows that isn't on the map any more (eaten, used, carried off, merged into
+        /// another stack, or a pawn that died or left), and trims each picked amount to what's left.
+        /// </summary>
+        /// <returns>Whether everything picked is still there</returns>
+        private bool selectionStillHere()
+        {
+            bool allHere = true;
+            foreach (StackedThings stack in availableItems.Where(stack => stack.Selected > 0))
+            {
+                stack.Things.RemoveAll(thing => !thing.Spawned || thing.Destroyed || (thing is Pawn pawn && pawn.Dead) || !ColonyItems.CanLeaveOnItsOwn(thing));
+                if (stack.Count < stack.Selected)
+                {
+                    stack.Selected = stack.Count;
+                    allHere = false;
+                }
+            }
+
+            // Rows with nothing left disappear from the list
+            filteredAvailableItems = filteredAvailableItems.Where(stack => stack.Count > 0).ToList();
+            return allHere;
+        }
+
+        /// <summary>
+        /// Turns the things on offer into rows for the offer lists.
+        /// Items are rebuilt and stacked as before. Animals get a display-only row each, so we don't generate a whole
+        /// new pawn every time the trade updates.
+        /// </summary>
+        /// <param name="protoThings">Things on offer</param>
+        /// <returns>Rows to draw</returns>
+        private static List<StackedThings> buildOfferCache(IEnumerable<ProtoThing> protoThings)
+        {
+            // ToList() runs the query once so we don't loop over protoThings twice
+            List<ProtoThing> offer = protoThings.ToList();
+
+            // Like Python's [t for t in offer if not is_display_pawn(t)]
+            List<StackedThings> rows = StackedThings.GroupThings(offer
+                .Where(protoThing => !StackedThings.IsDisplayPawn(protoThing))
+                .Select(TradingThingConverter.ConvertThingFromProtoOrUnknown));
+
+            // Animals and colonists get a display-only row each
+            rows.AddRange(offer
+                .Where(StackedThings.IsDisplayPawn)
+                .Select(StackedThings.ForDisplayPawn));
+
+            return rows;
+        }
+
+        /// <summary>
         /// Event handler for the <see cref="Client.OnTradeCompleted"/> and <see cref="Client.OnTradeCancelled"/> events.
         /// </summary>
         /// <param name="sender"></param>
@@ -358,37 +555,8 @@ namespace PhinixClient
                 tradeUpdated = true;
             }
 
-            // Check if there is a token we can process
-            if (!string.IsNullOrEmpty(args.Token))
-            {
-                lock (pendingItemStacksLock)
-                {
-                    // Check if there are pending item stacks for this token
-                    if (pendingItemStacks.ContainsKey(args.Token))
-                    {
-                        if (args.Success)
-                        {
-                            // Destroy and remove the pending items, they have been received by the server
-                            foreach (Thing thing in pendingItemStacks[args.Token].Things)
-                            {
-                                if (!thing.Destroyed) thing.Destroy();
-                            }
-
-                            pendingItemStacks.Remove(args.Token);
-                        }
-                        else
-                        {
-                            // Server failed to update the trade
-                            // Get all of the selected things from the item stacks and respawn them
-                            IEnumerable<Thing> things = pendingItemStacks[args.Token].Things;
-                            foreach (Thing thing in things)
-                            {
-                                GenSpawn.Spawn(thing, thing.Position, thing.Map, thing.Rotation, WipeMode.VanishOrMoveAside);
-                            }
-                        }
-                    }
-                }
-            }
+            // Holding or letting go of the items themselves is done by Client.settleTradeOffer, which runs even if
+            // this window has been closed
         }
 
         /// <summary>
@@ -401,7 +569,13 @@ namespace PhinixClient
         /// <param name="accepted">Offer accepted state</param>
         /// <param name="acceptedLabel">Accepted state label</param>
         /// <param name="checkboxInteractive">Whether to draw the accepted state checkbox in a more distinctly interactive style</param>
-        private void drawOffer(Rect inRect, string title, List<StackedThings> itemStacks, ref Vector2 scrollPos, ref bool accepted, string acceptedLabel, bool checkboxInteractive)
+        /// <param name="missingMods">Mods this offer needs that one side doesn't have, shown as a warning under the title</param>
+        /// <param name="modWarning">The warning's text</param>
+        /// <param name="modWarningOpen">Whether the list of missing mods is showing instead of the items</param>
+        /// <param name="modWarningScrollPos">Scroll position of the missing mods list</param>
+        /// <param name="side">"ours:" or "theirs:", to keep each offer's expanded mods apart in <see cref="expandedMods"/></param>
+        private void drawOffer(Rect inRect, string title, List<StackedThings> itemStacks, ref Vector2 scrollPos, ref bool accepted, string acceptedLabel, bool checkboxInteractive,
+            List<ModCheck.MissingMod> missingMods, string modWarning, ref bool modWarningOpen, ref Vector2 modWarningScrollPos, string side)
         {
             Rect titleRect = inRect.TopPartPixels(OFFER_WINDOW_TITLE_HEIGHT);
             Rect acceptedStateRect = new Rect(inRect.xMin, inRect.yMax - OFFER_WINDOW_CHECKBOX_HEIGHT - 2.5f, inRect.width, OFFER_WINDOW_CHECKBOX_HEIGHT);
@@ -439,8 +613,127 @@ namespace PhinixClient
                 Widgets.CheckboxLabeled(acceptedStateRect, acceptedLabel, ref accepted);
             }
 
-            // Items on offer
-            drawItemStackList(itemListRect, itemStacks, ref scrollPos, false);
+            // A warning under the title when mods are missing. Clicking it swaps the items for the list of missing mods
+            if (missingMods.Count > 0)
+            {
+                Rect warningRect = new Rect(itemListRect.x, itemListRect.y, itemListRect.width, MOD_WARNING_HEIGHT);
+                itemListRect.yMin = warningRect.yMax + 4f;
+                if (drawModWarning(warningRect, modWarning, modWarningOpen)) modWarningOpen = !modWarningOpen;
+            }
+            else
+            {
+                modWarningOpen = false;
+            }
+
+            // Items on offer, or the missing mods
+            if (modWarningOpen) drawMissingModList(itemListRect, missingMods, ref modWarningScrollPos, side);
+            else drawItemStackList(itemListRect, itemStacks, ref scrollPos, false);
+        }
+
+        /// <summary>
+        /// The warning above an offer, like "Bob is missing 2 mods used in this offer", or null if nothing is missing.
+        /// </summary>
+        /// <param name="missingMods">Missing mods</param>
+        /// <param name="keyPrefix">Translation key, completed with "One" or "Many"</param>
+        /// <param name="otherName">The other player's name</param>
+        private static string modWarningText(List<ModCheck.MissingMod> missingMods, string keyPrefix, string otherName)
+        {
+            if (missingMods.Count == 0) return null;
+            return (keyPrefix + (missingMods.Count == 1 ? "One" : "Many")).Translate(otherName, missingMods.Count);
+        }
+
+        /// <summary>
+        /// What won't arrive if we accept now: animals and colonists' missing parts, and items from mods we don't have.
+        /// </summary>
+        /// <returns>The confirmation box's text, or null if everything will arrive</returns>
+        private string describeLeftBehind()
+        {
+            List<string> parts = new List<string>();
+
+            string missingParts = PawnCheck.DescribeAll(trade.OtherPartyItemsOnOffer);
+            if (missingParts != null) parts.Add("Phinix_pawnCheck_partsLeftBehind".Translate(missingParts));
+
+            string missingItems = ModCheck.Describe(theirMissingMods);
+            if (missingItems != null) parts.Add("Phinix_modCheck_itemsLeftBehind".Translate(missingItems));
+
+            if (parts.Count == 0) return null;
+            return string.Join("\n\n", parts) + "\n\n" + "Phinix_trade_acceptAnyway".Translate();
+        }
+
+        /// <summary>
+        /// Draws the clickable missing mods warning, with an arrow showing whether the list is open.
+        /// </summary>
+        /// <returns>Whether it was clicked</returns>
+        private static bool drawModWarning(Rect rect, string text, bool open)
+        {
+            Widgets.DrawHighlightIfMouseover(rect);
+
+            Rect arrowRect = new Rect(rect.x + 4f, rect.center.y - 6f, 12f, 12f);
+            UnityEngine.GUI.DrawTexture(arrowRect, open ? TexButton.Collapse : TexButton.Reveal);
+
+            SaveTextFormat();
+            Text.Font = GameFont.Small;
+            Text.Anchor = TextAnchor.MiddleLeft;
+            UnityEngine.GUI.color = MISSING_PARTS_COLOR;
+            Widgets.LabelFit(new Rect(arrowRect.xMax + 6f, rect.y, rect.xMax - arrowRect.xMax - 6f, rect.height), text);
+            UnityEngine.GUI.color = Color.white;
+            RestoreTextFormat();
+
+            TooltipHandler.TipRegion(rect, "Phinix_modCheck_tip".Translate());
+            return Widgets.ButtonInvisible(rect);
+        }
+
+        /// <summary>
+        /// Draws the missing mods, each with a dropdown of the items in the offer that need it.
+        /// </summary>
+        private void drawMissingModList(Rect inRect, List<ModCheck.MissingMod> missingMods, ref Vector2 scrollPos, string side)
+        {
+            Widgets.DrawMenuSection(inRect);
+            Rect outRect = inRect.ContractedBy(4f);
+
+            // Measure first: a scroll view needs its total height before drawing
+            float contentHeight = missingMods.Sum(mod => MOD_LIST_ROW_HEIGHT * (1 + (expandedMods.Contains(side + mod.PackageId) ? mod.Items.Count : 0)));
+            float rowWidth = outRect.width - (contentHeight > outRect.height ? SCROLLBAR_WIDTH : 0f);
+            Rect viewRect = new Rect(0f, 0f, rowWidth, contentHeight);
+
+            SaveTextFormat();
+            Text.Anchor = TextAnchor.MiddleLeft;
+            Widgets.BeginScrollView(outRect, ref scrollPos, viewRect);
+            float y = 0f;
+            foreach (ModCheck.MissingMod mod in missingMods)
+            {
+                string key = side + mod.PackageId;
+                bool expanded = expandedMods.Contains(key);
+
+                // The mod, with how many items need it. Click to show or hide them
+                Rect headerRect = new Rect(0f, y, rowWidth, MOD_LIST_ROW_HEIGHT);
+                Widgets.DrawHighlightIfMouseover(headerRect);
+                UnityEngine.GUI.DrawTexture(new Rect(headerRect.x + 4f, headerRect.center.y - 6f, 12f, 12f), expanded ? TexButton.Collapse : TexButton.Reveal);
+                Text.Font = GameFont.Small;
+                Widgets.Label(new Rect(headerRect.x + 22f, headerRect.y, headerRect.width - 22f, headerRect.height),
+                    "Phinix_modCheck_modRow".Translate(mod.Name, mod.Items.Count).Truncate(headerRect.width - 22f));
+                if (Widgets.ButtonInvisible(headerRect))
+                {
+                    if (expanded) expandedMods.Remove(key);
+                    else expandedMods.Add(key);
+                }
+                y += MOD_LIST_ROW_HEIGHT;
+
+                if (!expanded) continue;
+
+                // Its items, indented and grey
+                Text.Font = GameFont.Tiny;
+                UnityEngine.GUI.color = Color.gray;
+                foreach (string item in mod.Items)
+                {
+                    Rect itemRect = new Rect(30f, y, rowWidth - 30f, MOD_LIST_ROW_HEIGHT);
+                    Widgets.Label(itemRect, item.Truncate(itemRect.width));
+                    y += MOD_LIST_ROW_HEIGHT;
+                }
+                UnityEngine.GUI.color = Color.white;
+            }
+            Widgets.EndScrollView();
+            RestoreTextFormat();
         }
 
         /// <summary>
@@ -470,8 +763,8 @@ namespace PhinixClient
             float currentY = contentRect.yMin;
             foreach (StackedThings stack in stacks)
             {
-                // Don't deal with empty stacks
-                if (stack.Things.Count == 0) continue;
+                // Don't deal with empty stacks (Count is 1 for display-only animal rows, which have no Things)
+                if (stack.Count == 0) continue;
 
                 Rect rowRect = new Rect(contentRect.xMin, currentY, contentRect.width, ROW_HEIGHT);
                 Rect iconRect = rowRect.LeftPartPixels(ICON_WIDTH);
@@ -539,10 +832,37 @@ namespace PhinixClient
                     RestoreTextFormat();
                 }
 
-                // Item name
+                // Pawns get an info button at the end of their name: offered pawns open the pawn inspector (there's no
+                // real pawn behind them), our own open the game's normal info card
+                Pawn ownPawn = stack.Things.FirstOrDefault() as Pawn;
+                if (stack.DisplayPawn != null || ownPawn != null)
+                {
+                    Rect infoRect = new Rect(itemNameRect.xMax - INFO_BUTTON_SIZE, rowRect.center.y - INFO_BUTTON_SIZE / 2, INFO_BUTTON_SIZE, INFO_BUTTON_SIZE);
+                    itemNameRect.width -= INFO_BUTTON_SIZE + 4f;
+
+                    if (stack.DisplayPawn != null)
+                    {
+                        TooltipHandler.TipRegion(infoRect, "Phinix_pawn_inspectTip".Translate());
+                        if (Widgets.ButtonImage(infoRect, TexButton.Info)) Find.WindowStack.Add(new PawnInspectWindow(stack.DisplayPawn));
+                    }
+                    else
+                    {
+                        Widgets.InfoCardButton(infoRect.x, infoRect.y, ownPawn);
+                    }
+                }
+
+                // Item name. An offered pawn with parts our game doesn't have is shown in orange, with what won't come
+                // in its tooltip
+                string missingParts = stack.DisplayPawn != null ? PawnCheck.Describe(stack.DisplayPawn) : null;
                 SaveTextFormat();
                 Text.Anchor = TextAnchor.MiddleLeft;
+                if (missingParts != null)
+                {
+                    UnityEngine.GUI.color = MISSING_PARTS_COLOR;
+                    TooltipHandler.TipRegion(itemNameRect, "Phinix_pawnCheck_rowTip".Translate(missingParts));
+                }
                 Widgets.LabelFit(itemNameRect, stack.Label);
+                UnityEngine.GUI.color = Color.white;
                 RestoreTextFormat();
 
                 // Toggle alternate background colour

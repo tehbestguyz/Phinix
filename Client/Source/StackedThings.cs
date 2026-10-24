@@ -10,18 +10,83 @@ namespace PhinixClient
     {
         public List<Thing> Things;
 
-        public int Count => Things.Sum(thing => thing.stackCount);
+        /// <summary>
+        /// Set when this row only displays an animal or colonist on offer, without a real pawn behind it.
+        /// Building a real pawn just to draw its name would mean generating a whole pawn every time the trade updates.
+        /// </summary>
+        private ProtoThing displayPawn;
 
-        public string Label => Things.First().LabelCapNoCount;
-        public ThingDef ThingDef => Things.First()?.def;
-        public ThingDef StuffDef => Things.First()?.Stuff;
-        public ThingStyleDef StyleDef => Things.First()?.StyleDef;
+        /// <summary>
+        /// The animal or colonist this row displays, or null for a normal row of items. Used to open the pawn inspector.
+        /// </summary>
+        public ProtoThing DisplayPawn => displayPawn;
+
+        // "=>" makes a read-only property that is recalculated each time it's read, a bit like Python's @property
+        public int Count => displayPawn != null ? 1 : Things.Sum(thing => thing.stackCount);
+
+        public string Label => displayPawn != null ? PawnLabel(displayPawn) : Things.First().LabelCapNoCount;
+        public ThingDef ThingDef => displayPawn != null ? DefDatabase<ThingDef>.GetNamedSilentFail(PawnDefName(displayPawn)) : Things.First()?.def;
+        // FirstOrDefault gives null on an empty list instead of throwing, which display-only rows need
+        public ThingDef StuffDef => Things.FirstOrDefault()?.Stuff;
+        public ThingStyleDef StyleDef => Things.FirstOrDefault()?.StyleDef;
 
         public int Selected = 0;
 
         public StackedThings(IEnumerable<Thing> things)
         {
             this.Things = things.ToList();
+        }
+
+        /// <summary>
+        /// Whether the given offered thing is a pawn (an animal or colonist) that gets a display-only row.
+        /// </summary>
+        /// <param name="protoThing">Offered thing</param>
+        /// <returns>Whether it is a pawn</returns>
+        public static bool IsDisplayPawn(ProtoThing protoThing) => protoThing.Animal != null || protoThing.Colonist != null;
+
+        /// <summary>
+        /// Creates a display-only row for an animal or colonist on offer.
+        /// </summary>
+        /// <param name="protoThing">Pawn to display</param>
+        /// <returns>Row with no real things in it</returns>
+        public static StackedThings ForDisplayPawn(ProtoThing protoThing)
+        {
+            // "new X(...) { field = value }" sets fields right after construction, like keyword arguments
+            return new StackedThings(Enumerable.Empty<Thing>()) { displayPawn = protoThing };
+        }
+
+        /// <summary>
+        /// Gets the race def name of an animal or colonist on offer.
+        /// </summary>
+        /// <param name="protoThing">Pawn on offer</param>
+        /// <returns>Race def name</returns>
+        public static string PawnDefName(ProtoThing protoThing) => protoThing.Animal != null ? protoThing.Animal.DefName : protoThing.Colonist.DefName;
+
+        /// <summary>
+        /// Builds a label like "Bessie (muffalo)" for an animal, or "Engie (human)" for a colonist.
+        /// </summary>
+        /// <param name="protoThing">Pawn to label</param>
+        /// <returns>Label text</returns>
+        public static string PawnLabel(ProtoThing protoThing)
+        {
+            // Fall back to the raw def name if the receiver doesn't have this race (e.g. a missing mod)
+            string defName = PawnDefName(protoThing);
+            ThingDef raceDef = DefDatabase<ThingDef>.GetNamedSilentFail(defName);
+            string raceLabel = raceDef != null ? raceDef.label : defName;
+
+            if (protoThing.Colonist != null)
+            {
+                ProtoColonist colonist = protoThing.Colonist;
+                string colonistName = !string.IsNullOrEmpty(colonist.NickName) ? colonist.NickName : colonist.FirstName;
+
+                // $"..." is C#'s version of a Python f-string
+                return $"{colonistName} ({raceLabel})";
+            }
+
+            ProtoAnimal animal = protoThing.Animal;
+            return string.IsNullOrEmpty(animal.CustomName)
+                ? raceLabel.CapitalizeFirst()
+                : $"{animal.CustomName} ({raceLabel})";
         }
 
         /// <summary>
@@ -92,8 +157,11 @@ namespace PhinixClient
         /// <summary>
         /// Removes the selected things from the stack and returns them.
         /// </summary>
+        /// <param name="positions">Filled with where each returned thing was, in the same order. A piece split off a
+        /// stack never had a position of its own, so it gets its stack's</param>
+        /// <param name="maps">Filled with the map each returned thing was on, the same way</param>
         /// <returns>Selected things</returns>
-        public IEnumerable<Thing> PopSelected()
+        public IEnumerable<Thing> PopSelected(List<IntVec3> positions, List<Map> maps)
         {
             List<Thing> poppedThings = new List<Thing>();
 
@@ -102,6 +170,10 @@ namespace PhinixClient
             {
                 // Check if we have popped all the necessary things, exiting the loop if so
                 if (remainingThings == 0) break;
+
+                // Remember where it is before any of it leaves the map
+                positions.Add(thing.Position);
+                maps.Add(thing.MapHeld);
 
                 // Check if this thing has more in its stack than we need to take
                 if (thing.stackCount > remainingThings)
